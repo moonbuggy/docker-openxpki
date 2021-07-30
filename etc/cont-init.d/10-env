@@ -1,0 +1,103 @@
+#! /usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+SQLITE_DB="${OXPKI_SQLITE_PATH:-/openxpki/database.sqlite3}"
+
+print_msg () { printf '[%s] %s' "${0##*/}" "${@}"; }
+echo_msg () { print_msg "${*}"; echo; }
+
+## display_env <var> <displayed value>
+display_env () { printf '%s %-20s %s\n' "[${0##*/}]" "${1}" "${2}"; }
+
+## declare_env <var> <value> [<displayed value>]
+declare_env () {
+	local key; key="${1}"
+	local val; val="${2:-${!key}}"
+
+	echo -n "${val}" > "/var/run/s6/container_environment/${key}"
+	display_env "${key}" "${3:-${val}}"
+}
+
+# check we have all the parameters we need to connect to a database
+# TYPE has to be done first because it's used in generating other parameters
+DB_YAML="/etc/openxpki/config.d/system/database.yaml"
+for var_name in TYPE HOST PORT NAME USER PASS ROOT_USER ROOT_PASS SSLMODE ORACLE_FILE_DEST ORACLE_SID TEST_DUMMY; do
+	var="OXPKI_DB_${var_name}"
+	var_display="${!var}"
+
+	# sqlite is a fixed file, not a remote server, and we don't need to process
+	# much of the environment
+	[ "${USQL_SCHEME}" = 'sqlite3' ] && case "${var_name}" in
+		'NAME')
+			declare_env "${var}" "${SQLITE_DB}"
+			continue ;;
+		'PORT'|'HOST'|'USER'|*'PASS'|*'ROOT'*|'SSLMODE')
+			[ -n "${var+set}" ] && declare_env "${var}" "" '[not required]'
+			continue ;;
+	esac
+
+	# if nothing from env, check database.yaml
+	if [ -z "${!var}" ] && [ -f "${DB_YAML}" ]; then
+		declare "${var}=$(grep -ioP "${var_name}:\s+\K.*" "${DB_YAML}")"
+		[ -n "${!var}" ] && var_display="${!var} (from database.yaml)"
+	fi
+
+	# if nothing from database.yaml either, stop
+	[ -z "${!var}" ] \
+		&& display_env "${var}" '*** not found ***' \
+		&& continue
+
+	# generate type strings needed for different software
+	if [ "${var_name}" = "TYPE" ]; then
+		case $(echo "${!var}" | tr '[:upper:]' '[:lower:]') in
+			maria*)
+				declare "${var}=MariaDB"
+				OXPKI_SCHEMA_FILE='mariadb'
+				USQL_SCHEME='mysql'
+				;;
+			mysql)
+				declare "${var}=MySQL"
+				OXPKI_SCHEMA_FILE='mysql'
+				USQL_SCHEME='mysql'
+				;;
+			pg|psql|pgsql|postgres*)
+				declare "${var}=PostgreSQL"
+				USQL_SCHEME='postgres'
+				OXPKI_SCHEMA_FILE='psql'
+				;;
+			oracle*)
+				declare "${var}=Oracle"
+				USQL_SCHEME='oracle'
+				OXPKI_SCHEMA_FILE='oracle'
+				;;
+			sqlite*)
+				declare "${var}=SQLite"
+				USQL_SCHEME='sqlite3'
+				OXPKI_SCHEMA_FILE='sqlite'
+				;;
+			db2)
+				declare "${var}=DB2"
+				USQL_SCHEME=''
+				OXPKI_SCHEMA_FILE=''
+				;;
+			*)
+				USQL_SCHEME='*** unknown ***'
+				OXPKI_SCHEMA_FILE='*** unknown ***'
+				;;
+		esac
+
+		# used in the usql command
+		declare_env 'USQL_SCHEME' "${USQL_SCHEME}"
+
+		# used in 20-sql to setup tables:
+		#		/etc/openxpki/contrib/sql/schema-${OXPKI_SCHEMA_FILE}.sql
+		declare_env 'OXPKI_SCHEMA_FILE' "${OXPKI_SCHEMA_FILE}"
+	fi
+
+	# hide passwords from log
+	[ "${var_name#*PASS}" != "${var_name}" ] && var_display='[hidden]'
+
+
+	# make sure downstream cont-init.d will see variables added from database.yaml
+	declare_env "${var}" "${!var}" "${var_display}"
+done
