@@ -1,0 +1,53 @@
+version: '3.9'
+
+services:
+  openxpki-alpine:
+    image: moonbuggy2000/openxpki:alpine-builder
+    container_name: openxpki-alpine
+    restart: "no"
+    environment:
+      - "OXI_TEST_DB_MYSQL_NAME=openxpki"
+      - "OXI_TEST_DB_MYSQL_DBHOST=mariadb"
+      - "OXI_TEST_DB_MYSQL_DBPORT=3306"
+      - "OXI_TEST_DB_MYSQL_USER=openxpki"
+      - "OXI_TEST_DB_MYSQL_PASSWORD=openxpki"
+    networks:
+      - mariadb
+
+  openxpki-debian:
+    image: moonbuggy2000/openxpki:debian-builder
+    container_name: openxpki-debian
+    restart: "no"
+    environment:
+      - "OXI_TEST_DB_MYSQL_NAME=openxpki"
+      - "OXI_TEST_DB_MYSQL_DBHOST=mariadb"
+      - "OXI_TEST_DB_MYSQL_DBPORT=3306"
+      - "OXI_TEST_DB_MYSQL_USER=openxpki"
+      - "OXI_TEST_DB_MYSQL_PASSWORD=openxpki"
+    networks:
+      - mariadb
+
+  mariadb:
+    image: jbergstroem/mariadb-alpine:10.4.15
+    container_name: mariadb
+    hostname: mariadb
+    restart: unless-stopped
+    ports:
+      - 3306:3306
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    environment:
+      - "MYSQL_DATABASE=openxpki"
+      - "MYSQL_USER=openxpki"
+      - "MYSQL_PASSWORD=openxpki"
+#      - "MYSQL_ROOT_PASSWORD=openxpki"
+    networks:
+      - mariadb
+
+volumes:
+  mariadb_data:
+    driver: local
+    name: mariadb_data
+
+networks:
+  mariadb:

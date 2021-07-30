@@ -1,0 +1,212 @@
+ARG OXPKI_VERSION="3.12.0"
+ARG OXPKI_CONFIG_VERSION="v3.12"
+ARG TARGET_ARCH_TAG="amd64"
+
+ARG BUILD_ROOT="/build"
+
+## get files we need, patch where necessary
+#
+FROM "moonbuggy2000/fetcher:latest-${TARGET_ARCH_TAG}" AS fetcher
+
+ARG BUILD_ROOT
+
+## OpenXPKI
+WORKDIR "${BUILD_ROOT}/openxpki"
+
+ARG OXPKI_VERSION
+RUN git clone --depth=1 --branch "v${OXPKI_VERSION%%-*}" https://github.com/openxpki/openxpki.git .
+
+
+## build things
+#
+FROM "moonbuggy2000/debian-builder:buster-${TARGET_ARCH_TAG}" AS builder
+
+USER root
+
+RUN apt-get update \
+	&& apt-get install -qy \
+		cpanminus \
+		libarchive-zip-perl \
+		libcapture-tiny-perl \
+		libclass-accessor-perl \
+		libcgi-fast-perl \
+		libcgi-session-perl \
+		libclass-factory-perl \
+		libconfig-merge-perl \
+		libconfig-std-perl \
+		libcrypt-cbc-perl \
+		libcrypt-jwt-perl \
+#		libcrypt-openssl-pkcs10-perl \
+		libcrypt-rijndael-perl \
+		libcrypt-x509-perl \
+#		libcryptx-perl \
+		libdata-serializer-perl \
+#		libdata-uuid-perl \
+		libdatetime-perl \
+		libdatetime-format-dateparse-perl \
+		libdatetime-format-strptime-perl \
+		libdbd-mock-perl \
+		libdbd-sqlite3-perl \
+		libdevel-nytprof-perl \
+		libextutils-makemaker-cpanfile-perl \
+		libfile-slurp-perl \
+		libgetopt-lucid-perl \
+		libgit-pureperl-perl \
+		libio-prompt-perl \
+		libio-sessiondata-perl \
+		libintl-perl \
+		libjson-perl \
+		liblocale-gettext-perl \
+		liblog-log4perl-perl \
+		libmodule-build-tiny-perl \
+		libmoose-perl \
+		libmoosex-insideout-perl \
+		libmoosex-nonmoose-perl \
+		libmoosex-params-validate-perl \
+		libnet-dns-perl \
+		libnet-ldap-perl \
+		libnet-server-perl \
+		libnetaddr-ip-perl \
+#		libossp-uuid-perl \
+		libpath-class-perl \
+		libpod-coverage-trustpod-perl \
+		libpod-pom-perl \
+		libproc-daemon-perl \
+		libproc-processtable-perl \
+		libregexp-common-perl \
+#		libsoap-lite-perl \
+		libsql-abstract-more-perl \
+		libsys-sigaction-perl \
+		libtask-weaken-perl \
+		libtemplate-perl \
+		libtest-cleannamespaces-perl \
+		libtest-deep-perl \
+		libtest-failwarnings-perl \
+		libtest-fatal-perl \
+		libtest-kwalitee-perl \
+		libtest-most-perl \
+		libtest-pod-perl \
+		libtest-pod-coverage-perl \
+		libtest-requires-perl \
+		libtest-sharedfork-perl \
+		libtest-warnings-perl \
+		libtext-csv-xs-perl \
+		libxml-parser-lite-perl \
+		libxml-simple-perl \
+		libyaml-tiny-perl
+
+
+RUN cpanm \
+		App::mymeta_requires \
+		Config::Std \
+		ExtUtils::MakeMaker
+
+ARG BUILD_ROOT
+COPY --from=fetcher "${BUILD_ROOT}" "${BUILD_ROOT}"
+
+## fix Config::Versioned
+ENV USER=root
+
+## OpenXPKI
+WORKDIR "${BUILD_ROOT}/openxpki/core/server"
+
+RUN apt-get install -qy \
+		libssl-dev
+
+RUN perl Makefile.PL
+
+RUN mymeta-requires | cpanm
+RUN make
+
+# required for testing only
+RUN apt-get install -qy \
+		libcrypt-ssleay-perl \
+		libdbd-mariadb-perl \
+		libdbd-mysql-perl \
+		libnet-ssleay-perl \
+		libsub-uplevel-perl \
+		libtest-harness-perl \
+		libtest-nowarnings-perl \
+		libtest-prereq-perl \
+		libtest-simple-perl \
+		libtest-warn-perl \
+		perl-openssl-defaults
+
+RUN cpanm \
+		Test::Harness \
+		Test::More \
+		Test::Prereq
+
+RUN apt-get install -qy \
+		carton \
+		less \
+		lib32z1-dev \
+		libclass-std-perl \
+		libconfig-gitlike-perl \
+		libconfig-std-perl \
+		libclass-load-perl \
+		libclass-load-xs-perl \
+		libcrypt-cbc-perl \
+		libcrypt-pbkdf2-perl \
+		libcrypt-rijndael-perl \
+		libcrypt-x509-perl \
+		libcryptx-perl \
+		libdevel-globaldestruction-perl \
+		libdevel-overloadinfo-perl \
+		libdevel-stacktrace-perl \
+		libdigest-hmac-perl \
+		libdigest-sha3-perl \
+		libdist-checkconflicts-perl \
+		libexpat1-dev \
+		libexporter-tiny-perl \
+		libhttp-cookies-perl \
+		libhttp-date-perl \
+		libhttp-message-perl \
+		libhttp-negotiate-perl \
+		libjson-perl \
+		liblog-log4perl-perl \
+		liblwp-mediatypes-perl \
+		liblwp-protocol-https-perl \
+		libmailtools-perl \
+		libmime-tools-perl \
+		libmodule-build-perl \
+		libmoosex-nonmoose-perl \
+		libmodule-runtime-perl \
+		libmoosex-strictconstructor-perl \
+		libmoosex-types-path-class-perl \
+		libmoosex-types-perl \
+		libmro-compat-perl \
+#		libnet-ssleay-perl \
+		libnetaddr-ip-perl \
+		libsub-quote-perl \
+		libtimedate-perl \
+		libtest-deep-perl \
+		libtest-distribution-perl \
+		libtest-pod-perl \
+		libtext-soundex-perl \
+		libtype-tiny-perl \
+		libxml-simple-perl \
+		libyaml-perl \
+		locales \
+		nano \
+		sed
+
+RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen \
+	&& dpkg-reconfigure --frontend=noninteractive locales
+
+WORKDIR "${BUILD_ROOT}/openxpki"
+
+RUN cpanm Carton
+RUN ./tools/scripts/makefile2cpanfile.pl > cpanfile \
+	&& carton install
+
+# some tests don't pull DBHOST from ENV, need to create database.yaml
+COPY entrypoint.sh /entrypoint.sh
+COPY database.yaml /etc/openxpki/config.d/system/
+
+# we need dig in the entrypoint
+RUN apt-get install -qy \
+	dnsutils
+
+#ENTRYPOINT ["tail", "-f", "/dev/null"]
+ENTRYPOINT ["/entrypoint.sh"]

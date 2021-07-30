@@ -1,0 +1,9 @@
+main:
+    debug: 0
+    type: MariaDB
+    name: openxpki
+    host: mariadb
+    port: 3306
+    user: openxpki
+    passwd: openxpki
+

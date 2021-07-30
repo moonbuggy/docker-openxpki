@@ -1,0 +1,3 @@
+#!/usr/bin/execlineb -P
+
+exec apache2ctl -DFOREGROUND
