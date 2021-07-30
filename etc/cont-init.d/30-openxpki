@@ -1,0 +1,80 @@
+#! /usr/bin/with-contenv sh
+# shellcheck shell=sh
+
+[ ! -z "${INIT_DEBUG}" ] && set -x
+
+print_msg () { printf '[%s] %s' "${0##*/}" "${@}"; }
+echo_msg () { print_msg "${*}"; echo; }
+
+# check config.d exists
+# this will be taken care of by create_db_tables in 20-database, but it won't
+# necessarily run, so double check here
+print_msg '/etc/openxpki/contrib .. '
+if [ ! -d "/etc/openxpki/contrib" ]; then
+	echo 'missing!'
+
+	[ ! -d '/etc/openxpki' ] && mkdir -p '/etc/openxpki'
+
+	print_msg "Installing config from github.com/openxpki/openxpki-config (${OXPKI_CONFIG_VERSION}).. "
+	wget -qO- "https://github.com/openxpki/openxpki-config/archive/refs/tags/${OXPKI_CONFIG_VERSION}.tar.gz" \
+		| tar fzx - --strip-components=1 -C /etc/openxpki || { echo "Error: could not fetch config."; exit 1; }
+
+	chown -R openxpki:root /etc/openxpki
+	echo 'done'
+else
+	echo 'OK'
+fi
+
+# set database.yaml from env
+DB_YAML="/etc/openxpki/config.d/system/database.yaml"
+
+print_msg "${DB_YAML}.. "
+for var_name in TYPE HOST PORT NAME USER PASS; do
+	var="OXPKI_DB_${var_name}"
+	value="$(eval echo \"\$${var}\")"
+
+	[ -z "${value}" ] && continue
+
+	[ "${var_name}" = "PASS" ] && yaml_name='passwd'
+	sed -E "s|(^\s+${yaml_name-${var_name}}:\s+).*$|\\1${yaml_value:-${value}}|gmi" -i "${DB_YAML}"
+done && echo 'OK'
+
+
+# enable or disable databse debug mode
+# this is _not_ the same as OXPKI_DEBUG, which sets the --debug argument on the executable at run time
+sed -E "s|(^\s+debug:\s+).*$|\\1${OXPKI_DB_DEBUG:-0}|gmi" -i "${DB_YAML}"
+
+
+# make sure we have a config
+print_msg 'Initialization.. '
+if [ ! -f '/etc/openxpki/.initiated' ] || [ -f '/etc/openxpki/.force_init' ]; then
+	echo 'running'
+	print_msg 'Creating config.. '
+	CUSTOMCONFIG_FILE="${OXPKI_SETUP_IMPORT_DIR:-/import}/customconfig.sh"
+	CUSTOMCONFIG_FILE_ALT='/etc/openxpki/customconfig.sh'
+	DEFAULTCONFIG_FILE='/etc/openxpki/defaultconfig.sh'
+	SAMPLECONFIG_FILE='/etc/openxpki/contrib/sampleconfig.sh'
+
+	using_file=''
+	if [ -f "${CUSTOMCONFIG_FILE}" ]; then using_file="${CUSTOMCONFIG_FILE}"
+	elif [ -f "${CUSTOMCONFIG_FILE_ALT}" ]; then using_file="${CUSTOMCONFIG_FILE_ALT}"
+	elif [ -f "${DEFAULTCONFIG_FILE}" ]; then using_file="${DEFAULTCONFIG_FILE}"
+	elif [ -f "${SAMPLECONFIG_FILE}" ]; then using_file="${SAMPLECONFIG_FILE}"
+	else
+		echo 'ERROR: could not find customconfig.sh, defaultconfig.sh or sampleconfig.sh'
+		exit 1
+	fi
+
+	echo "using ${using_file}"
+	chmod a+x "${using_file}"
+	"${using_file}" || { echo_msg "$?"; echo_msg '*** ERROR ***'; exit 1; }
+
+	# sampleconfig.sh starts the server, which conflicts with services.d at init
+	openxpkictl stop >/dev/null 2>&1 || true
+	service apache2 stop >/dev/null 2>&1 || true
+
+	rm -f /etc/openxpki/.force_init >/dev/null 2>&1
+	echo >/etc/openxpki/.initiated
+else
+	echo 'OK'
+fi

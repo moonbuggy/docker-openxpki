@@ -1,0 +1,8 @@
+#!/usr/bin/execlineb -P
+
+#exec s6-notifyoncheck openxpkictl --no-detach start
+
+with-contenv
+importas debug_string OXPKI_DEBUG
+ifelse { test ! -z ${debug_string} } { exec openxpkictl --no-detach --debug ${debug_string} start }
+exec openxpkictl --no-detach start

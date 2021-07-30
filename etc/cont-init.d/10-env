@@ -1,0 +1,115 @@
+#! /usr/bin/with-contenv sh
+# shellcheck shell=sh
+
+[ ! -z "${INIT_DEBUG}" ] && set -x
+
+print_msg () { printf '[%s] %s' "${0##*/}" "${@}"; }
+echo_msg () { print_msg "${*}"; echo; }
+
+## display_env <var> <displayed value>
+display_env () { printf '%s %-20s %s\n' "[${0##*/}]" "${1}" "${2}"; }
+
+## declare_env <var> <value> [<displayed value>]
+declare_env () {
+	key="${1}"
+	val="${2:-\$${key}}"
+
+	printf '%s' "${val}" > "/var/run/s6/container_environment/${key}"
+	display_env "${key}" "${3:-${val}}"
+}
+
+# OXPKI_DB_* variables
+# check we have all the parameters we need to connect to a database
+# TYPE has to be done first because it's used in generating other parameters
+DB_YAML="/etc/openxpki/config.d/system/database.yaml"
+for var_name in TYPE HOST PORT NAME USER PASS ROOT_USER ROOT_PASS SSLMODE; do
+	var="OXPKI_DB_${var_name}"
+	value="$(eval echo \"\$${var}\")"
+	val_display="${value}"
+
+	# if nothing from env, check database.yaml
+	if [ -z "${value}" ] && [ -f "${DB_YAML}" ]; then
+		value="$(grep -ioP "${var_name#*_}:\s+\K.*" "${DB_YAML}")"
+		[ -n "${value}" ] && val_display="${value} (from database.yaml)"
+	fi
+
+	# if nothing from database.yaml either, stop
+	[ -z "${value}" ] \
+		&& display_env "${var}" '*** not found ***' \
+		&& continue
+
+	# generate type strings needed for different software
+	if [ "x${var_name}" = 'xTYPE' ]; then
+		case $(echo "${value}" | tr '[:upper:]' '[:lower:]') in
+			maria*)
+				value="MariaDB"
+				OXPKI_SCHEMA_FILE='mariadb'
+				USQL_SCHEME='mysql'
+				;;
+			mysql)
+				value="MySQL"
+				OXPKI_SCHEMA_FILE='mysql'
+				USQL_SCHEME='mysql'
+				;;
+			pg|psql|pgsql|postgres*)
+				value="PostgreSQL"
+				USQL_SCHEME='postgres'
+				OXPKI_SCHEMA_FILE='psql'
+				;;
+			*)
+				USQL_SCHEME='*** unknown ***'
+				OXPKI_SCHEMA_FILE='*** unknown ***'
+				;;
+		esac
+
+		# used in the usql command
+		declare_env 'USQL_SCHEME' "${USQL_SCHEME}"
+
+		# used in 20-sql to setup tables:
+		#		/etc/openxpki/contrib/sql/schema-${OXPKI_SCHEMA_FILE}.sql
+		declare_env 'OXPKI_SCHEMA_FILE' "${OXPKI_SCHEMA_FILE}"
+	fi
+
+	# hide passwords from log
+	[ "${var_name#*PASS}" != "${var_name}" ] && val_display='[hidden]'
+
+	# make sure downstream cont-init.d will see variables added from database.yaml
+	declare_env "${var}" "${value}" "${val_display}"
+done
+
+# OXPKI_SETUP_* variables
+# used by defaultconfig.sh
+for var_name in REALM IMPORT_DIR CA_DIR KEY_PASS RAOP_NAME RAOP_PASS FQDN ROOT_CA_SUBJECT ISSUING_CA_SUBJECT; do
+	var="OXPKI_SETUP_${var_name}"
+	value="$(eval echo \"\$${var}\")"
+
+	# if not set, do nothing
+	[ -z "${value}" ] && continue
+
+	val_display="${value}"
+
+	# if REALM is set assume we want to populate defaults for some other variables
+	# if they're not also set in the environment
+	if [ "x${var_name}" = 'xREALM' ]; then
+
+		# default IMPORT_DIR needs to be declared for downstream cont-init.d
+		[ -z "${OXPKI_SETUP_IMPORT_DIR+set}" ] \
+			&& declare_env 'OXPKI_SETUP_IMPORT_DIR' '/import'
+
+		# default CA_DIR needs to be declared for downstream cont-init.d
+		[ -z "${OXPKI_SETUP_CA_DIR+set}" ] \
+			&& declare_env 'OXPKI_SETUP_CA_DIR' \
+				"/etc/openxpki/config.d/realm/${OXPKI_SETUP_REALM}/ca" \
+				"realm/${OXPKI_SETUP_REALM}/ca"
+
+		# unset KEY_PASS means we want to use random passwords
+		# this doesn't need to be declared, but display to indicate [random]
+		[ -z "${OXPKI_SETUP_KEY_PASS+set}" ] \
+			&& display_env 'OXPKI_SETUP_KEY_PASS' '[random]'
+	fi
+
+	# hide passwords from log
+	[ "${var_name#*PASS}" != "${var_name}" ] && val_display='[hidden]'
+
+	display_env "${var}" "${val_display}"
+done

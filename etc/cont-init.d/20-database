@@ -1,0 +1,226 @@
+#! /usr/bin/with-contenv sh
+# shellcheck shell=sh
+
+[ ! -z "${INIT_DEBUG}" ] && set -x
+
+print_msg () { printf '[%s] %s' "${0##*/}" "${@}"; }
+echo_msg () { print_msg "${*}"; echo; }
+
+DSN="${USQL_SCHEME}://${OXPKI_DB_USER}:${OXPKI_DB_PASS}@${OXPKI_DB_HOST}:${OXPKI_DB_PORT}/${OXPKI_DB_NAME}"
+DSN_ROOT="${USQL_SCHEME}://${OXPKI_DB_ROOT_USER}:${OXPKI_DB_ROOT_PASS}@${OXPKI_DB_HOST}:${OXPKI_DB_PORT}"
+
+db_root_cmd () { usql "${DSN_ROOT}${usql_cmd_append}" "${@}" 2>&1; }
+db_cmd () { usql "${DSN}${usql_cmd_append}" "${@}" 2>&1; }
+
+usql_cmd_append=''
+
+case "${USQL_SCHEME}" in
+	mysql)
+		db_create_db_cmd="CREATE DATABASE ${OXPKI_DB_NAME} CHARSET utf8;"
+		db_create_user_cmd="CREATE USER '${OXPKI_DB_USER}'@'%' IDENTIFIED BY '${OXPKI_DB_PASS}';"
+		db_grant_user_cmd="GRANT ALL ON ${OXPKI_DB_NAME}.* TO '${OXPKI_DB_USER}'@'%';"
+		db_count_tables_cmd="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '${OXPKI_DB_NAME}';"
+		;;
+	postgres)
+		db_create_db_cmd="CREATE DATABASE ${OXPKI_DB_NAME} ENCODING utf8;"
+		db_create_user_cmd="CREATE USER ${OXPKI_DB_USER} WITH PASSWORD '${OXPKI_DB_PASS}';"
+		db_grant_user_cmd="GRANT ALL ON DATABASE ${OXPKI_DB_NAME} TO ${OXPKI_DB_USER};"
+		db_count_tables_cmd="SELECT COUNT (*) FROM information_schema.tables WHERE table_schema = 'public';"
+		# sslmode: "require" (default), "verify-full", "verify-ca", or "disable"
+		usql_cmd_append="?sslmode=${OXPKI_DB_SSLMODE:-disable}"
+		;;
+	*) echo_msg "ERROR: invalid USQL_SCHEME (${USQL_SCHEME}) or OXPKI_DB_TYPE (${OXPKI_DB_TYPE})"; exit 1 ;;
+esac
+
+
+# this method checks for an open port on the database host without needing to use
+# the database client, but it generates error logs on the server tagged with this
+# container's IP
+#
+# also, /dev/tcp is undefined in ash, only works for bash
+# waitfor_db_devtcp () {
+# 	count=0
+# 	max_count=${OXPKI_DB_MAX_RETRIES:-30}
+#
+# 	print_msg 'Checking database connection.. '
+# 	while ! 2>/dev/null > "/dev/tcp/${OXPKI_DB_HOST}/${OXPKI_DB_PORT}"; do
+# 		count=$((count + 1))
+# 		if [ $count -ge 30 ]; then
+# 			print_msg 'Too many retries.'
+# 			return 1
+# 		fi
+#
+# 		echo;	print_msg "Could not connect to ${OXPKI_DB_HOST}, will retry.. "
+# 		sleep 5
+# 	done
+# 	echo 'OK'
+# }
+
+# this method talks to the server in a language it expects. although it still
+# generates some logs they'll usually be clearer and should be tagged with
+# 'openxpki', so at least they're not potentially alarming mystery logs
+waitfor_db () {
+	count=0
+	max_count=${OXPKI_DB_MAX_RETRIES:-30}
+
+	print_msg 'Checking database connection.. '
+	while ! result="$(db_cmd -qc '\Z')"; do
+		count=$((count + 1))
+		if [ $count -ge "${max_count}" ]; then
+			echo 'FAIL'
+			echo_msg "Could not connect to: $(echo "${DSN}" | sed -E 's|\/\/.*@|\/\/|')"
+			echo_msg "${result}"
+			echo_msg 'Too many retries.'
+			return 1
+		fi
+
+		# allowed errors:
+		#
+		# error: mysql: 1045: Access denied for user ''@'<XXXXX>' (using password: NO)
+		# error: mysql: 1049: Unknown database '<XXXXX>'
+		# error: pq: 28P01: password authentication failed for user "<XXXXX>"
+		case "${result}" in
+			*'1045'*|*'1049'*|*'28P01'*) break ;;
+			*) echo;	print_msg "Could not connect, will retry (${count}).. "
+				sleep 5
+				;;
+		esac
+	done && echo 'OK'
+}
+
+
+# check the user login and the existance of the database in one go, any
+# failure at all triggers individual testing for the various things we need
+check_db () {
+	print_msg 'Checking database access.. '
+	result="$(db_cmd -qc '\Z')" || { echo 'no access!'; return 1; }
+	echo 'OK'
+}
+
+create_db () {
+	# skip creation for sqlite, any of the previous commands will have created it
+	[ "${USQL_SCHEME}" = 'sqlite3' ] && return
+
+	print_msg 'Checking root access.. '
+
+	unset failed
+	[ -z "${OXPKI_DB_ROOT_USER+set}" ] \
+		&& { echo 'ERROR: No root user found in OXPKI_DB_ROOT_USER'; failed=1; }
+	[ -z "${OXPKI_DB_ROOT_PASS+set}" ] \
+		&& { echo 'ERROR: No root password found in OXPKI_DB_ROOT_PASS'; failed=1; }
+	[ -n "${failed}" ] && exit 1
+
+	result="$(db_root_cmd -qc '\Z')" || { echo "${result}"; exit 1; }
+	echo 'OK'
+
+	# allowed errors:
+	#
+	# error: mysql: 1007: Can't create database '<XXXXX>'; database exists
+	# error: pq: 42P04: database "<XXXXX>" already exists
+	print_msg 'Creating database.. '
+	if ! result="$(db_root_cmd -qc "${db_create_db_cmd} \Z")"; then
+		case "${result}" in
+			*'1007'*|*'42P04'*) echo 'exists' ;;
+			*) echo "${result}" && exit 1 ;;
+		esac
+	else echo 'OK'
+	fi
+
+	# allowed errors:
+	#
+	# error: mysql: 1396: Operation CREATE USER failed for '<XXXXX>'@'%'
+	# error: pq: 42710: role "<XXXXX>" already exists
+	print_msg 'Creating user.. '
+	if ! result="$(db_root_cmd -qc "${db_create_user_cmd} \Z")"; then
+		case "${result}" in
+			*'1396'*|*'42710'*) echo 'exists' ;;
+			*) echo "${result}" && exit 1 ;;
+		esac
+	else echo 'OK'
+	fi
+
+	print_msg 'Granting permissions.. '
+	if ! result="$(db_root_cmd -qc "${db_grant_user_cmd} \Z")"; then
+		case "${result}" in
+			*) echo "${result}" && exit 1 ;;
+		esac
+	else echo 'OK'
+	fi
+
+#	db_root_cmd -qc 'flush privileges; \Z' >/dev/null
+}
+
+check_db_tables () {
+	print_msg 'Checking tables exist.. '
+	table_count="$(db_cmd -qAtc "${db_count_tables_cmd} \Z")" \
+		|| { echo "${table_count}"; exit 1; }
+
+	[ "x${table_count}" = "x0" ] && echo 'missing' && return 1
+	echo "OK (${table_count})"
+#	echo 'OK'
+}
+
+create_db_tables () {
+	schema_file="/etc/openxpki/contrib/sql/schema-${OXPKI_SCHEMA_FILE}.sql"
+
+	# get database schema files, if missing
+	if [ ! -f "${schema_file}" ]; then
+		echo_msg "${schema_file}.. missing!"
+		if [ -d "/etc/openxpki/contrib" ]; then
+			print_msg 'No schema file but /etc/openxpki/contrib exists. Not fetching config, exiting.'
+			exit 1
+		else
+			[ ! -d '/etc/openxpki' ] && mkdir -p '/etc/openxpki'
+
+			print_msg "Installing config from github.com/openxpki/openxpki-config (${OXPKI_CONFIG_VERSION}).. "
+			wget -qO- "https://github.com/openxpki/openxpki-config/archive/refs/tags/${OXPKI_CONFIG_VERSION}.tar.gz" \
+				| tar fzx - --strip-components=1 -C /etc/openxpki || { echo "Error: could not fetch config."; exit 1; }
+
+				chown -R openxpki:root /etc/openxpki
+				echo 'done'
+		fi
+	fi
+
+	print_msg "Creating tables from ${schema_file}.. "
+	[ ! -f "${schema_file}" ] && echo "ERROR: no schema at ${schema_file}" && return 1
+
+	# append a usql close command to the schema file, otherwise we don't exit clean
+	[ "$(tail -n1 "${schema_file}")" != '\Z' ] && printf '\n\Z\n' >> "${schema_file}"
+
+	# allowed errors:
+	#
+	# error: pq: 42501: must be owner of extension plpgsql
+	# error: pq: 42P07: relation <XXXXX> already exists
+	# error: pq: 42P16: multiple primary keys for table <XXXXX> are not allowed
+	if ! result="$(db_cmd -qf "${schema_file}")"; then
+		failed=''
+		while IFS= read -r line; do
+			[ "${line#*error}" = "${line}" ] && continue
+			case "${line}" in
+				*'42501'*|*'42P07'*|*'42P16'*) true ;;
+				*) echo "${line}"; failed='true' ;;
+			esac
+		done <<EOF
+${result}
+EOF
+		[ -n "${failed}" ] && exit 1
+	fi
+
+	echo 'OK'
+}
+
+
+# wait until we can connect to the database server or time out
+waitfor_db || { echo '*** ERROR ***'; exit 1; }
+
+# check we can access the database, otherwise create database and user
+if ! check_db; then
+	create_db;
+	check_db || { echo '*** ERROR ***'; exit 1; }
+fi
+
+# check database tables exist, otherwise create them
+if ! check_db_tables; then
+	create_db_tables
+	check_db_tables || { echo '*** ERROR ***'; exit 1; }
+fi
