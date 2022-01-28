@@ -6,10 +6,11 @@ ARG OXPKI_CONFIG_VERSION="v3.12"
 ARG TARGET_ARCH_TAG="amd64"
 
 ARG USQL_BUILD="mypost"
+ARG USQL_VERSION="latest"
 
 ## get usql-static
 #
-FROM "moonbuggy2000/usql-static:latest-${USQL_BUILD}-${TARGET_ARCH_TAG}" AS usql
+FROM "moonbuggy2000/usql-static:${USQL_VERSION}-${USQL_BUILD}-${TARGET_ARCH_TAG}" AS usql
 
 ## build the image
 #

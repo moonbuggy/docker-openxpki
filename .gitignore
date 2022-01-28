@@ -3,5 +3,5 @@
 _dummyfile
 *.bak
 OpenXPKI*
+openxpki/
 customconfig.sh
-

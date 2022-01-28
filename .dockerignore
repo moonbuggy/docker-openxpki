@@ -5,4 +5,5 @@ Dockerfile*
 hooks/
 .build_data/
 OpenXPKI*
+openxpki/
 customconfig.sh
